@@ -1,7 +1,8 @@
 # Painel de Vendas GSM
 
-Fonte HTML do Artifact "Painel de Vendas GSM" (Claude), que reune GSM Agencia (Agencia, Totem, Unificado, Comissao) e GSM Online (Guanabara, Princesa, Unificado, Comissao).
+Retrato do painel de vendas do Grupo GSM, com GSM Agencia (Agencia, Totem, Unificado, Comissao) e GSM Online (Guanabara, Princesa, Unificado, Comissao).
 
-- `painel-de-vendas-gsm.html`: codigo da pagina, como publicada no Artifact.
-- Os dados (vendas, meses, comissoes) ficam no banco do Artifact, nao neste repositorio. Fora do Artifact a pagina abre sem dados.
-- Para atualizar o Artifact, edite o HTML e publique de novo no mesmo Artifact.
+- `index.html` e `painel-de-vendas-gsm.html`: retrato estatico com os dados embutidos (copias identicas). Abre sem login. Nao atualiza sozinho: a data de geracao aparece no topo da pagina.
+- `fonte-artifact.html`: codigo do Artifact ao vivo no Claude. Fora do Claude ele abre sem dados.
+
+Para atualizar o retrato, peca a geracao de um novo e envie os dois arquivos juntos.
