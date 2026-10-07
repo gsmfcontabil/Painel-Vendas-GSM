@@ -431,14 +431,16 @@ function computeStats(g, mk, canal){
   let totalQtd, temQtd;
   if(g.qtdMode==='vendedor'){ totalQtd = okDays.reduce((s,d)=>s+Object.values(d.v).reduce((a,x)=>a+(x.qtd||0),0),0); temQtd = totalQtd>0; }
   else { totalQtd = okDays.reduce((s,d)=>s+(d.qtdTotal||0),0); temQtd = okDays.some(d=>d.qtdTotal!=null); }
-  const hist = Object.values(month.segurosHistoricos||{}).reduce((a,b)=>a+b,0);
-  const totalSeguro = okDays.reduce((s,d)=>s+Object.values(d.v).reduce((a,x)=>a+(x.seguro||0),0),0) + (canal===g.canais[0]?hist:0);
+  const histMap = month.segurosHistoricos||{};   // seguros de meses lançados só como total do mês, por bilheteiro
+  const hist = vendedores.reduce((a,v)=>a+(histMap[v]||0),0);
+  const totalSeguro = okDays.reduce((s,d)=>s+Object.values(d.v).reduce((a,x)=>a+(x.seguro||0),0),0) + hist;
   const diasComVenda = okDays.filter(d=>d.total>0);
   const melhorDia = diasComVenda.reduce((b,d)=>(!b||d.total>b.total)?d:b,null);
   const piorDia = diasComVenda.reduce((w,d)=>(!w||d.total<w.total)?d:w,null);
   const mediaDiaria = diasComVenda.length ? totalVenda/diasComVenda.length : 0;
   const porVendedor={}; vendedores.forEach(v=>{ porVendedor[v]={venda:0,qtd:0,seguro:0}; });
   okDays.forEach(d=>{ vendedores.forEach(v=>{ const x=d.v[v]; if(x){ porVendedor[v].venda+=x.venda||0; porVendedor[v].qtd+=x.qtd||0; porVendedor[v].seguro+=x.seguro||0; } }); });
+  vendedores.forEach(v=>{ porVendedor[v].seguro += histMap[v]||0; });
   return { vendedores, daily, dim, totalVenda, totalQtd, temQtd, totalSeguro, hist, ticketMedio: totalQtd?totalVenda/totalQtd:0,
     melhorDia, piorDia, mediaDiaria, projecao: mediaDiaria*dim, porVendedor, diasProcessados: okDays.length, diasComVenda: diasComVenda.length };
 }
@@ -452,9 +454,10 @@ function computeUnified(g, mk){
     if(parts.every(p=>p.status==='pending')){ daily.push({date,status:'pending',total:0,qtd:0,pv:{},canais:{}}); continue; }
     const pv={}; let total=0, qtd=0; const canais={};
     parts.forEach((p,ci)=>{ if(p.status==='pending') return; canais[g.canais[ci]] = p.total; total+=p.total;
-      Object.entries(p.v).forEach(([v,x])=>{ const n=pessoaOf(v); const e=pv[n]||(pv[n]={venda:0,qtd:0}); e.venda+=x.venda||0; e.qtd+=x.qtd||0; qtd+=x.qtd||0; add(n, x.venda||0, x.qtd||0, x.seguro||0, codeOf(v)); }); });
+      Object.entries(p.v).forEach(([v,x])=>{ const n=pessoaOf(v); const e=pv[n]||(pv[n]={venda:0,qtd:0}); e.venda+=x.venda||0; e.qtd+=x.qtd||0; qtd+=x.qtd||0; add(n, x.venda||0, x.qtd||0, 0, codeOf(v)); }); });
     daily.push({ date, status: total>0?'ok':'zero', total, qtd, pv, canais });
   }
+  sets.forEach(s=>Object.entries(s.porVendedor).forEach(([v,d])=>{ const n=pessoaOf(v); if(pessoas[n]) pessoas[n].seguro += d.seguro||0; }));
   const totalVenda = sets.reduce((s,x)=>s+x.totalVenda,0), totalQtd = sets.reduce((s,x)=>s+x.totalQtd,0), totalSeguro = sets.reduce((s,x)=>s+x.totalSeguro,0);
   const okDays = daily.filter(d=>d.status!=='pending'), diasComVenda = okDays.filter(d=>d.total>0);
   const mediaDiaria = diasComVenda.length ? totalVenda/diasComVenda.length : 0;
@@ -548,8 +551,20 @@ function rankingHtml(rows, total, withQtd){
     return `<div class="rankrow"><span class="rank-dot" style="background:${color}"></span>
       <span class="rank-name">${esc(r.nome)}${chips}</span>
       <span class="rank-bar-track"><span class="rank-bar" style="width:${pct}%;background:${color}"></span></span>
-      <span class="rank-val">${fmtR(r.venda)} · ${fmtPct(pct)}${withQtd?' · '+fmtN(r.qtd)+' pass.':''}</span></div>`;
+      <span class="rank-val">${fmtR(r.venda)} · ${fmtPct(pct)}${r.extra?' · '+r.extra:(withQtd?' · '+fmtN(r.qtd)+' pass.':'')}</span></div>`;
   }).join('');
+}
+// Ranking de seguros: rows = [{nome,key,seguro,venda}]; mostra R$ de seguro, % do total de seguros e seguro ÷ venda líquida
+function segurosSection(id, hint){
+  const d=document.createElement('div'); d.className='section';
+  d.innerHTML=`<div class="section-head"><h2>Ranking de seguros</h2><span class="hint">${hint}</span></div><div class="card" id="${id}"></div>`;
+  return d;
+}
+function segurosCardHtml(rows){
+  const ord=rows.filter(r=>r.seguro>0).sort((a,b)=>b.seguro-a.seguro);
+  if(!ord.length) return '<span style="font-size:13px;color:var(--ink-faint)">Nenhum seguro lançado neste mês. Os valores entram pela coluna Extras (seguro opcional) do relatório de cada dia.</span>';
+  const tot=ord.reduce((a,r)=>a+r.seguro,0);
+  return rankingHtml(ord.map(r=>({nome:r.nome,key:r.key,venda:r.seguro,extra:r.venda>0?fmtPct(r.seguro/r.venda*100)+' da venda':''})), tot, false);
 }
 function moving3(vals){ return vals.map((v,i)=>{ if(v===null) return null; const w=vals.slice(Math.max(0,i-2),i+1).filter(x=>x!==null); return w.reduce((a,b)=>a+b,0)/w.length; }); }
 const axisOpts = (soft,line) => ({
@@ -589,6 +604,7 @@ function renderCompany(g, mk, canal){
   const rk=document.createElement('div'); rk.className='section';
   rk.innerHTML=`<div class="section-head"><h2>Ranking de bilheteiros</h2><button class="btn" id="btnVendorDetail">Ver índices por vendedor</button></div><div class="card" id="rankCard"></div>`;
   box.appendChild(rk);
+  box.appendChild(segurosSection('segCard','seguro opcional vendido no mês · % = seguro ÷ venda líquida do bilheteiro'));
 
   if(!porDia){
     const tk=document.createElement('div'); tk.className='section';
@@ -603,7 +619,7 @@ function renderCompany(g, mk, canal){
   const lim=document.createElement('div'); lim.className='section';
   lim.innerHTML=`<div class="section-head"><h2>Limitações e dados ausentes</h2></div><div class="card"><ul class="limlist">
     <li>Este painel é o registro do dia a dia; a planilha Excel continua sendo a fonte oficial e auditável.</li>
-    ${porDia ? '<li>A quantidade de passagens só existe como total do dia (agência + totem juntos). Sem quebra por bilheteiro, "passagens" e "ticket médio" por vendedor não são calculáveis.</li><li>Taxa de embarque e comparativos com mês/ano anterior continuam só na planilha.</li>'
+    ${porDia ? '<li>A quantidade de passagens só existe como total do dia (agência + totem juntos). Sem quebra por bilheteiro, "passagens" e "ticket médio" por vendedor não são calculáveis.</li><li>Taxa de embarque e comparativos com mês/ano anterior continuam só na planilha.</li><li>Seguros: de agosto/2026 em diante (agosto e setembro como total do mês, outubro em diante dia a dia). Meses anteriores ficam sem seguros no painel.</li>'
              : '<li>Não há dados de leads, atendimento, CRM, metas ou marketing: o único indicador de conversão possível é venda líquida ÷ passagens.</li><li>"Seguros vendidos" soma o lançado dia a dia e um eventual saldo histórico herdado da planilha.</li>'}
     ${g.showPending ? '<li>Dia sem lançamento aparece como "clique p/ lançar" e não conta como zero. Zero só existe quando confirmado como "sem venda".</li>' : ''}
     ${open ? '<li>A projeção usa a média diária dos dias lançados × dias do mês. É extrapolação simples.</li>' : ''}
@@ -613,6 +629,7 @@ function renderCompany(g, mk, canal){
   raf(()=>{
     try{ drawEvoCompany(s, canal); }catch(e){ console.error('evo',e); }
     try{ const rows=Object.entries(s.porVendedor).sort((a,b)=>b[1].venda-a[1].venda).map(([n,d])=>({nome:n, key:codeOf(n), venda:d.venda, qtd:d.qtd})); $('rankCard').innerHTML=rankingHtml(rows,s.totalVenda,!porDia); }catch(e){ console.error('rank',e); }
+    try{ $('segCard').innerHTML=segurosCardHtml(Object.entries(s.porVendedor).map(([n,d])=>({nome:n,key:codeOf(n),seguro:d.seguro,venda:d.venda}))); }catch(e){ console.error('seg',e); }
     if(!porDia){ try{ drawTicket(s); }catch(e){ console.error('ticket',e); } }
     try{ drawTable(g,s,canal); }catch(e){ console.error('table',e); }
     const b=$('btnVendorDetail'); if(b) b.onclick=()=>openVendorDetail(g,s);
@@ -671,6 +688,8 @@ function renderUnificadoAgb(g, mk){
     <div class="kpi"><span class="kpi-label">Passagens</span><span class="kpi-value">${sA.temQtd?fmtN(sA.totalQtd):'—'}</span><span class="kpi-sub">total do dia, agência+totem</span></div>
     <div class="kpi"><span class="kpi-label">Ticket médio</span><span class="kpi-value">${sA.temQtd?fmtR(total/sA.totalQtd):'—'}</span><span class="kpi-sub">líquido ÷ passagens</span></div>
     <div class="kpi"><span class="kpi-label">Seguros</span><span class="kpi-value">${fmtR(sA.totalSeguro+sT.totalSeguro)}</span></div></div>`;
+  w.appendChild(segurosSection('segCardU','Agência + Totem · % = seguro ÷ venda líquida do bilheteiro'));
+  raf(()=>{ try{ $('segCardU').innerHTML=segurosCardHtml([...Object.entries(sA.porVendedor),...Object.entries(sT.porVendedor)].map(([n,d])=>({nome:n,key:codeOf(n),seguro:d.seguro,venda:d.venda}))); }catch(e){ console.error('segU',e); } });
   return w;
 }
 function renderUnificadoOnline(g, mk){
@@ -708,6 +727,7 @@ function renderUnificadoOnline(g, mk){
   const rk=document.createElement('div'); rk.className='section';
   rk.innerHTML=`<div class="section-head"><h2>Ranking de vendedores</h2><button class="btn" id="btnPessoaDetail">Ver índices por vendedor</button></div><div class="card" id="rankCardU"></div>`;
   box.appendChild(rk);
+  box.appendChild(segurosSection('segCardU','por vendedor, somando todos os códigos · % = seguro ÷ venda líquida'));
 
   const tb=document.createElement('div'); tb.className='section';
   tb.innerHTML=`<div class="section-head"><h2>Tabela unificada: ${monthLong(mk)}</h2><span class="hint">vendas líquidas por vendedor, Guanabara + Princesa</span></div><div class="tablewrap"><table id="tableU"></table></div>`;
@@ -716,6 +736,7 @@ function renderUnificadoOnline(g, mk){
   raf(()=>{
     try{ drawEvoUnified(u,nomes); }catch(e){ console.error('evoU',e); }
     try{ $('rankCardU').innerHTML=rankingHtml(nomes.map(n=>({nome:n,key:n,venda:u.pessoas[n].venda,qtd:u.pessoas[n].qtd,codigos:u.pessoas[n].codigos})),u.totalVenda,true); }catch(e){ console.error('rankU',e); }
+    try{ $('segCardU').innerHTML=segurosCardHtml(nomes.map(n=>({nome:n,key:n,seguro:u.pessoas[n].seguro,venda:u.pessoas[n].venda}))); }catch(e){ console.error('segU',e); }
     try{ drawTableUnified(u,nomes); }catch(e){ console.error('tableU',e); }
     const b=$('btnPessoaDetail'); if(b) b.onclick=()=>openPessoaDetail(u,nomes);
   });
