@@ -299,11 +299,11 @@ function store(k,v){ try{ if(v===undefined) return localStorage.getItem(k); loca
 const GROUPS = {
   agb: { id:'agb', nome:'GSM Agência', sub:'AG Antônio Bezerra · Agência e Totem', cor:'var(--g-agb)',
     mCol:'months', eCol:'entries', canais:['Agencia','Totem'], canalLabel:{Agencia:'Agência',Totem:'Totem'},
-    tabs:['Agencia','Totem','Unificado','Comissão'], qtdMode:'dia', showPending:false,
+    tabs:['Agencia','Totem','Unificado','Comissão'], qtdMode:'dia', showPending:false, cancelCanais:['Agencia'],
     fonte:'MAPA DE VENDAS GSM – 2026.xlsx', pdfNome:'Conta Corrente Agencia' },
   online:{ id:'online', nome:'GSM Online', sub:'Guanabara e Princesa', cor:'var(--g-online)',
     mCol:'on_months', eCol:'on_entries', canais:['Guanabara','Princesa'], canalLabel:{Guanabara:'Guanabara',Princesa:'Princesa'},
-    tabs:['Guanabara','Princesa','Unificado','Comissão'], qtdMode:'vendedor', showPending:true,
+    tabs:['Guanabara','Princesa','Unificado','Comissão'], qtdMode:'vendedor', showPending:true, cancelCanais:['Guanabara','Princesa'],
     fonte:'MAPA DE VENDAS GSM ONLINE – 2026.xlsx', pdfNome:'Conta Corrente Agência' }
 };
 const GROUP_ORDER = ['agb','online'];
@@ -315,30 +315,42 @@ function pessoaOf(v){
   const c = codeOf(v); if(CODE_PESSOA[c]) return CODE_PESSOA[c];
   const m = String(v).match(/\((.*)\)\s*$/); return m ? m[1].trim() : c;
 }
-const COM = { base:10, fator:30, especialMeses:[1,7,12], especialBase:7, pisoLuciele:810.5, pctGervasio:0.5 };
-// Pamella e qualquer funcionário novo: venda líq. × 10% × 30% (jan, jul e dez: × 7% × 30%)
-// Luciele: venda líq. × 10% × 30%, só vale acima de R$ 810,50 (o fixo dela)
-// Gervásio (TABE31): venda líq. × 0,5%
-function regraOnline(nome){
-  const n = nome.toLowerCase();
-  if(n==='gervásio' || n==='gervasio') return { tipo:'pct', cadastrada:true };
-  if(n.startsWith('lucie')) return { tipo:'luciele', cadastrada:true };
-  if(n==='pamella') return { tipo:'padrao', cadastrada:true };
-  return { tipo:'padrao', cadastrada:false };
-}
-function comissaoOnline(nome, venda, mk){
-  const r = regraOnline(nome); const mes = Number(mk.slice(5,7));
-  let calc, texto, pagar;
-  if(r.tipo==='pct'){ calc = venda*COM.pctGervasio/100; texto = 'venda líq. × 0,5%'; pagar = calc; }
-  else if(r.tipo==='luciele'){ calc = venda*COM.base/100*COM.fator/100; texto = 'venda líq. × 10% × 30%, só acima de '+fmtR(COM.pisoLuciele); pagar = calc>COM.pisoLuciele ? calc : 0; }
+// Comissão GSM Online = sempre sobre a VENDA LÍQUIDA (bruto × (1 − % de cancelamento do mês)), código por código, como nas
+// linhas 37 e 87 da planilha; a linha 92 soma os códigos de cada pessoa.
+const COM = { base:10, fator:30, especialMeses:[1,7,12], especialBase:7, pisoLuciele:810.5, inicioRegraNova:'2026-09' };
+const REGRAS_CODIGO = {
+  'TABE31':  { tipo:'pct', pct:0.5 },     // Gervásio (Guanabara): líq. × 0,5%
+  'GSMAG03': { tipo:'pct', pct:0.3 },     // Gervásio (Princesa): líq. × 0,3%
+  'TABE16':  { tipo:'pct', pct:0.3 },     // líq. × 0,3%
+  '230415D': { tipo:'padrao' },           // Pamella (Guanabara): líq. × 10% × 30%
+  'GSMAG04': { tipo:'padrao' },           // Pamella (Princesa)
+  '230415E': { tipo:'luciele' }           // Luciele: líq. × 10% × 30%, só vale acima de R$ 810,50 (o fixo)
+};
+function comissaoCodigo(code, liq, mk){
+  const mes = Number(mk.slice(5,7));
+  if(mk < COM.inicioRegraNova){   // até agosto/2026: 0,3% para todos, Pamella 3% (como estava na planilha)
+    const pam = code==='230415D' || code==='GSMAG04'; const calc = liq*(pam?3:0.3)/100;
+    return { calc, pagar:calc, texto: pam?'líq. × 3% (10% × 30%)':'líq. × 0,3%', cadastrada:true, abaixoPiso:false };
+  }
+  const r = REGRAS_CODIGO[code] || { tipo:'padrao', nova:true };
+  let calc, texto, pagar, abaixoPiso=false;
+  if(r.tipo==='pct'){ calc = liq*r.pct/100; pagar = calc; texto = 'líq. × '+String(r.pct).replace('.',',')+'%'; }
+  else if(r.tipo==='luciele'){ calc = liq*COM.base/100*COM.fator/100; abaixoPiso = calc<COM.pisoLuciele; pagar = abaixoPiso?0:calc; texto = 'líq. × 10% × 30%, só acima de '+fmtR(COM.pisoLuciele); }
   else {
     const esp = COM.especialMeses.includes(mes); const b = esp?COM.especialBase:COM.base;
-    calc = venda*b/100*COM.fator/100; pagar = calc;
-    texto = 'venda líq. × '+b+'% × 30%'+(esp?' (jan, jul e dez)':'');
+    calc = liq*b/100*COM.fator/100; pagar = calc; texto = 'líq. × '+b+'% × 30%'+(esp?' (jan, jul e dez)':'');
   }
-  return { calc, pagar, texto, cadastrada:r.cadastrada, abaixoPiso: r.tipo==='luciele' && calc<=COM.pisoLuciele };
+  return { calc, pagar, texto, cadastrada:!r.nova, abaixoPiso };
 }
-
+function comissaoMes(g, mk){
+  const u = computeUnified(g, mk); const porCodigo=[];
+  u.sets.forEach((s,ci)=>{ Object.entries(s.porVendedor).forEach(([v,d])=>{
+    if(!(d.bruto>0)) return; const code=codeOf(v); const c=comissaoCodigo(code, d.venda, mk);
+    porCodigo.push({ canal:g.canais[ci], code, vendedor:v, pessoa:pessoaOf(v), bruto:d.bruto, liq:d.venda, ...c }); }); });
+  const porPessoa={};
+  porCodigo.forEach(r=>{ const p=porPessoa[r.pessoa]||(porPessoa[r.pessoa]={bruto:0,liq:0,calc:0,pagar:0,codigos:[]}); p.bruto+=r.bruto; p.liq+=r.liq; p.calc+=r.calc; p.pagar+=r.pagar; p.codigos.push(r.code); });
+  return { u, porCodigo, porPessoa, total:porCodigo.reduce((a,r)=>a+r.pagar,0), base:porCodigo.reduce((a,r)=>a+r.liq,0) };
+}
 // ============ estado ============
 const C = { agb:{months:{},entries:{}}, online:{months:{},entries:{}} };
 const S = { group:'agb', month:{agb:null,online:null}, tab:{agb:'Agencia',online:'Guanabara'} };
@@ -404,6 +416,13 @@ async function loadOnlineAll(){
 }
 
 // ============ estatísticas ============
+// % de cancelamentos do mês (N34 do Mapa / L34 e L84 da GSM Online): venda líquida = bruto × (1 − %). null = não informado.
+function cancelPct(g, mk, canal){
+  if(!g.cancelCanais.includes(canal)) return null;
+  const c=(C[g.id].months[mk]||{}).cancelamentoPct; if(c==null) return null;
+  if(typeof c==='number') return c;
+  return c[canal]==null ? null : Number(c[canal]);
+}
 function vendorList(g, mk, canal, entries){
   const month = C[g.id].months[mk]; const base = (month?.empresas?.[canal]?.vendedores) || [];
   const set = new Set(base);
@@ -427,7 +446,9 @@ function computeStats(g, mk, canal){
   const { vendedores, daily, dim } = buildDaily(g, mk, canal);
   const month = C[g.id].months[mk] || {};
   const okDays = daily.filter(d=>d.status!=='pending');
-  const totalVenda = okDays.reduce((s,d)=>s+d.total,0);
+  const totalBruto = okDays.reduce((s,d)=>s+d.total,0);
+  const pct = cancelPct(g, mk, canal), fator = 1-(pct||0)/100;
+  const totalVenda = totalBruto*fator;   // venda LÍQUIDA (a que vale para KPI, ranking, ticket e comissão)
   let totalQtd, temQtd;
   if(g.qtdMode==='vendedor'){ totalQtd = okDays.reduce((s,d)=>s+Object.values(d.v).reduce((a,x)=>a+(x.qtd||0),0),0); temQtd = totalQtd>0; }
   else { totalQtd = okDays.reduce((s,d)=>s+(d.qtdTotal||0),0); temQtd = okDays.some(d=>d.qtdTotal!=null); }
@@ -438,17 +459,17 @@ function computeStats(g, mk, canal){
   const melhorDia = diasComVenda.reduce((b,d)=>(!b||d.total>b.total)?d:b,null);
   const piorDia = diasComVenda.reduce((w,d)=>(!w||d.total<w.total)?d:w,null);
   const mediaDiaria = diasComVenda.length ? totalVenda/diasComVenda.length : 0;
-  const porVendedor={}; vendedores.forEach(v=>{ porVendedor[v]={venda:0,qtd:0,seguro:0}; });
+  const porVendedor={}; vendedores.forEach(v=>{ porVendedor[v]={venda:0,qtd:0,seguro:0,bruto:0}; });
   okDays.forEach(d=>{ vendedores.forEach(v=>{ const x=d.v[v]; if(x){ porVendedor[v].venda+=x.venda||0; porVendedor[v].qtd+=x.qtd||0; porVendedor[v].seguro+=x.seguro||0; } }); });
-  vendedores.forEach(v=>{ porVendedor[v].seguro += histMap[v]||0; });
-  return { vendedores, daily, dim, totalVenda, totalQtd, temQtd, totalSeguro, hist, ticketMedio: totalQtd?totalVenda/totalQtd:0,
+  vendedores.forEach(v=>{ porVendedor[v].seguro += histMap[v]||0; porVendedor[v].bruto = porVendedor[v].venda; porVendedor[v].venda = porVendedor[v].bruto*fator; });
+  return { vendedores, daily, dim, totalVenda, totalBruto, pct, fator, suportaCancel:g.cancelCanais.includes(canal), totalQtd, temQtd, totalSeguro, hist, ticketMedio: totalQtd?totalVenda/totalQtd:0,
     melhorDia, piorDia, mediaDiaria, projecao: mediaDiaria*dim, porVendedor, diasProcessados: okDays.length, diasComVenda: diasComVenda.length };
 }
 // GSM Online: soma Guanabara + Princesa e junta os códigos de cada pessoa
 function computeUnified(g, mk){
   const sets = g.canais.map(c=>computeStats(g,mk,c));
   const dim = sets[0].dim; const daily=[]; const pessoas={};
-  const add = (nome, venda, qtd, seguro, code)=>{ const p = pessoas[nome] || (pessoas[nome]={venda:0,qtd:0,seguro:0,codigos:{}}); p.venda+=venda; p.qtd+=qtd; p.seguro+=seguro; p.codigos[code]=(p.codigos[code]||0)+venda; };
+  const add = (nome, venda, qtd, seguro, code)=>{ const p = pessoas[nome] || (pessoas[nome]={venda:0,bruto:0,qtd:0,seguro:0,codigos:{}}); p.bruto+=venda; p.qtd+=qtd; p.seguro+=seguro; p.codigos[code]=(p.codigos[code]||0)+venda; };
   for(let i=0;i<dim;i++){
     const parts = sets.map(s=>s.daily[i]); const date = parts[0].date;
     if(parts.every(p=>p.status==='pending')){ daily.push({date,status:'pending',total:0,qtd:0,pv:{},canais:{}}); continue; }
@@ -457,13 +478,13 @@ function computeUnified(g, mk){
       Object.entries(p.v).forEach(([v,x])=>{ const n=pessoaOf(v); const e=pv[n]||(pv[n]={venda:0,qtd:0}); e.venda+=x.venda||0; e.qtd+=x.qtd||0; qtd+=x.qtd||0; add(n, x.venda||0, x.qtd||0, 0, codeOf(v)); }); });
     daily.push({ date, status: total>0?'ok':'zero', total, qtd, pv, canais });
   }
-  sets.forEach(s=>Object.entries(s.porVendedor).forEach(([v,d])=>{ const n=pessoaOf(v); if(pessoas[n]) pessoas[n].seguro += d.seguro||0; }));
-  const totalVenda = sets.reduce((s,x)=>s+x.totalVenda,0), totalQtd = sets.reduce((s,x)=>s+x.totalQtd,0), totalSeguro = sets.reduce((s,x)=>s+x.totalSeguro,0);
+  sets.forEach(s=>Object.entries(s.porVendedor).forEach(([v,d])=>{ const n=pessoaOf(v); if(pessoas[n]){ pessoas[n].seguro += d.seguro||0; pessoas[n].venda += d.venda||0; } }));
+  const totalBruto = sets.reduce((s,x)=>s+x.totalBruto,0), totalVenda = sets.reduce((s,x)=>s+x.totalVenda,0), totalQtd = sets.reduce((s,x)=>s+x.totalQtd,0), totalSeguro = sets.reduce((s,x)=>s+x.totalSeguro,0);
   const okDays = daily.filter(d=>d.status!=='pending'), diasComVenda = okDays.filter(d=>d.total>0);
   const mediaDiaria = diasComVenda.length ? totalVenda/diasComVenda.length : 0;
   const melhorDia = diasComVenda.reduce((b,d)=>(!b||d.total>b.total)?d:b,null);
   const piorDia = diasComVenda.reduce((w,d)=>(!w||d.total<w.total)?d:w,null);
-  return { sets, daily, dim, pessoas, totalVenda, totalQtd, totalSeguro, ticketMedio: totalQtd?totalVenda/totalQtd:0, mediaDiaria, projecao: mediaDiaria*dim,
+  return { sets, daily, dim, pessoas, totalVenda, totalBruto, totalQtd, totalSeguro, ticketMedio: totalQtd?totalVenda/totalQtd:0, mediaDiaria, projecao: mediaDiaria*dim,
     melhorDia, piorDia, diasProcessados: okDays.length, diasComVenda: diasComVenda.length };
 }
 // Pessoas do mês a partir de um conjunto de entradas (qualquer mês já carregado)
@@ -524,7 +545,7 @@ function insightsFor(g, mk, s, canalOuNull){
     html += `<div class="insight"><div><b>${esc(n)} concentra ${fmtPct(share)} das vendas do mês</b><span>${fmtR(d.venda)}${g.qtdMode==='vendedor'?' em '+fmtN(d.qtd)+' passagens':' no período'}.</span>
       <div class="conf">${s.diasProcessados<10?'Confiança baixa: poucos dias no mês ainda.':''}</div></div></div>`;
   }
-  if(s.piorDia) html += `<div class="insight warn"><div><b>Pior dia: ${fmtDateFull(s.piorDia.date)} (${dow(s.piorDia.date)}), ${fmtR(s.piorDia.total)}</b><span>Contra uma média diária de ${fmtR(s.mediaDiaria)}. Vale checar se houve motivo pontual antes de tratar como tendência.</span></div></div>`;
+  if(s.piorDia) html += `<div class="insight warn"><div><b>Pior dia (bruto): ${fmtDateFull(s.piorDia.date)} (${dow(s.piorDia.date)}), ${fmtR(s.piorDia.total)}</b><span>Contra uma média diária bruta de ${fmtR(s.diasComVenda?s.totalBruto/s.diasComVenda:0)}. Vale checar se houve motivo pontual antes de tratar como tendência.</span></div></div>`;
   const prev = sortedMonths(g).filter(k=>k<mk).pop();
   if(prev && canalOuNull){
     const ps = computeStats(g, prev, canalOuNull);
@@ -535,8 +556,28 @@ function insightsFor(g, mk, s, canalOuNull){
   }
   return html;
 }
+const fmtPct2 = n => (n||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}) + '%';
+function liqSub(s){   // linha extra do KPI "Vendas líquidas": mostra o bruto e o % de cancelamentos usado
+  if(!s.suportaCancel) return '';
+  return s.pct!=null ? `<span class="kpi-sub">bruto ${fmtR(s.totalBruto)} · cancelamentos ${fmtPct2(s.pct)}</span>`
+                     : `<span class="kpi-sub">cancelamento do mês não informado: líquida = bruta</span>`;
+}
+function liqSubU(u){
+  const inf = u.sets.filter(x=>x.suportaCancel);
+  if(!inf.length) return '';
+  return inf.some(x=>x.pct!=null) ? `<span class="kpi-sub">bruto ${fmtR(u.totalBruto)} (cancelamentos já descontados)</span>` : `<span class="kpi-sub">cancelamento do mês não informado: líquida = bruta</span>`;
+}
+async function saveCancel(g, mk, canal){
+  const m=$('cancelMsg'); const raw=$('fCancel').value; const n=parseFloat(String(raw).replace(',','.'));
+  if(raw===''||isNaN(n)||n<0||n>100){ m.textContent='Informe um percentual entre 0 e 100.'; m.className='formmsg show err'; return; }
+  if(!db){ m.textContent='Banco indisponível.'; m.className='formmsg show err'; return; }
+  const md=C[g.id].months[mk]||{}; let nv;
+  if(g.id==='agb') nv=n; else { const old=(md.cancelamentoPct&&typeof md.cancelamentoPct==='object')?md.cancelamentoPct:{}; nv={...old,[canal]:n}; }
+  try{ await db.doc(g.mCol+'/'+mk).set({...md, cancelamentoPct:nv}); m.textContent='Salvo. Vendas líquidas e comissões recalculadas.'; m.className='formmsg show ok'; }
+  catch(e){ m.textContent='Não consegui salvar ('+(e?.message||'erro')+').'; m.className='formmsg show err'; }
+}
 function projKpi(s, isOpen){
-  const lbl = isOpen?'Projeção do mês':(s.melhorDia?'Melhor dia':'—');
+  const lbl = isOpen?'Projeção do mês':(s.melhorDia?'Melhor dia (bruto)':'—');
   const val = isOpen?fmtR(s.projecao):(s.melhorDia?fmtR(s.melhorDia.total):'—');
   const sub = isOpen?'média diária × '+s.dim+' dias':(s.melhorDia?fmtDateFull(s.melhorDia.date)+' ('+dow(s.melhorDia.date)+')':'');
   return `<div class="kpi"><span class="kpi-label">${lbl}</span><span class="kpi-value">${val}</span><span class="kpi-sub">${sub}</span></div>`;
@@ -588,12 +629,18 @@ function renderCompany(g, mk, canal){
        <div class="kpi"><span class="kpi-label">Ticket médio</span><span class="kpi-value">${fmtR(s.ticketMedio)}</span><span class="kpi-sub">líquido ÷ passagens</span></div>`;
   const segSub = s.hist ? 'inclui saldo histórico' : 'lançado dia a dia';
   const kpi=document.createElement('div'); kpi.className='kpirow';
-  kpi.innerHTML=`<div class="kpi hero-k"><span class="kpi-label">Vendas líquidas</span><span class="kpi-value">${fmtR(s.totalVenda)}</span><span class="kpi-sub">${s.diasProcessados} de ${s.dim} dias lançados</span></div>
+  kpi.innerHTML=`<div class="kpi hero-k"><span class="kpi-label">Vendas líquidas</span><span class="kpi-value">${fmtR(s.totalVenda)}</span><span class="kpi-sub">${s.diasProcessados} de ${s.dim} dias lançados</span>${liqSub(s)}</div>
     ${qtdKpis}
     <div class="kpi"><span class="kpi-label">Média diária</span><span class="kpi-value">${fmtR(s.mediaDiaria)}</span><span class="kpi-sub">só dias com venda</span></div>
     <div class="kpi"><span class="kpi-label">Seguros vendidos</span><span class="kpi-value">${fmtR(s.totalSeguro)}</span><span class="kpi-sub">${segSub}</span></div>
     ${projKpi(s,open)}`;
   box.appendChild(kpi);
+  if(s.suportaCancel && !STATIC){
+    const cc=document.createElement('div'); cc.className='card'; cc.style.cssText='display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end';
+    cc.innerHTML=`<div class="field" style="flex:1 1 240px"><label for="fCancel">% de cancelamentos de ${monthLong(mk)} (${esc(label)})</label><input id="fCancel" type="number" step="0.0001" min="0" max="100" placeholder="ex: 9,25" value="${s.pct==null?'':s.pct}"></div>
+      <button class="btn primary" id="btnCancel">Salvar e recalcular</button><span class="formmsg" id="cancelMsg" style="flex:1 1 100%"></span>`;
+    box.appendChild(cc);
+  }
 
   const ins=document.createElement('div'); ins.className='section'; ins.innerHTML=insightsFor(g,mk,s,canal); box.appendChild(ins);
 
@@ -619,6 +666,7 @@ function renderCompany(g, mk, canal){
   const lim=document.createElement('div'); lim.className='section';
   lim.innerHTML=`<div class="section-head"><h2>Limitações e dados ausentes</h2></div><div class="card"><ul class="limlist">
     <li>Este painel é o registro do dia a dia; a planilha Excel continua sendo a fonte oficial e auditável.</li>
+    ${s.suportaCancel ? '<li>Venda líquida = venda bruta − % de cancelamentos do mês (linha 34 da planilha). A tabela e o gráfico diários mostram o valor bruto de cada dia; KPIs, ranking, ticket médio e comissão usam a líquida.</li>' : ''}
     ${porDia ? '<li>A quantidade de passagens só existe como total do dia (agência + totem juntos). Sem quebra por bilheteiro, "passagens" e "ticket médio" por vendedor não são calculáveis.</li><li>Taxa de embarque e comparativos com mês/ano anterior continuam só na planilha.</li><li>Seguros: de agosto/2026 em diante (agosto e setembro como total do mês, outubro em diante dia a dia). Meses anteriores ficam sem seguros no painel.</li>'
              : '<li>Não há dados de leads, atendimento, CRM, metas ou marketing: o único indicador de conversão possível é venda líquida ÷ passagens.</li><li>"Seguros vendidos" soma o lançado dia a dia e um eventual saldo histórico herdado da planilha.</li>'}
     ${g.showPending ? '<li>Dia sem lançamento aparece como "clique p/ lançar" e não conta como zero. Zero só existe quando confirmado como "sem venda".</li>' : ''}
@@ -633,6 +681,7 @@ function renderCompany(g, mk, canal){
     if(!porDia){ try{ drawTicket(s); }catch(e){ console.error('ticket',e); } }
     try{ drawTable(g,s,canal); }catch(e){ console.error('table',e); }
     const b=$('btnVendorDetail'); if(b) b.onclick=()=>openVendorDetail(g,s);
+    const bc=$('btnCancel'); if(bc) bc.onclick=()=>saveCancel(g,mk,canal);
   });
   return box;
 }
@@ -643,7 +692,7 @@ function drawEvoCompany(s, canal){
   const vals=s.daily.map(d=>d.status==='pending'?null:d.total);
   const cols=s.daily.map(d=>d.status==='zero'?faint:(d.status==='pending'?'transparent':base));
   charts.push(new Chart($('chartEvo'),{ type:'bar', data:{ labels, datasets:[
-    {type:'bar',label:'Venda líquida do dia',data:vals,backgroundColor:cols,borderRadius:3,maxBarThickness:22},
+    {type:'bar',label:'Venda do dia (bruta)',data:vals,backgroundColor:cols,borderRadius:3,maxBarThickness:22},
     {type:'line',label:'Média móvel (3 dias)',data:moving3(vals),borderColor:ink,borderWidth:2,borderDash:[4,3],pointRadius:0,tension:.3}]},
     options:{ responsive:true, maintainAspectRatio:false,
       onClick:(e,els)=>{ if(!STATIC && els.length) openAdd(curMonth(), canal, s.daily[els[0].index].date); },
@@ -671,7 +720,14 @@ function drawTable(g, s, canal){
     return `<tr class="${cls}" data-date="${d.date}"><td>${fmtDate(d.date)} · ${dow(d.date)}</td>${cells}<td>${tot}</td>${extra}</tr>`;
   }).join('')+'</tbody>';
   const fext = ext ? `<td>${fmtN(s.totalQtd)}</td><td>${s.temQtd?fmtR(s.ticketMedio):'—'}</td>` : '';
-  const foot=`<tfoot><tr><td>Total (dias lançados)</td>${vend.map(v=>`<td>${fmtR(s.porVendedor[v].venda)}</td>`).join('')}<td>${fmtR(s.totalVenda)}</td>${fext}</tr></tfoot>`;
+  let foot;
+  if(s.suportaCancel){
+    foot = `<tfoot><tr><td>Total bruto (dias lançados)</td>${vend.map(v=>`<td>${fmtR(s.porVendedor[v].bruto)}</td>`).join('')}<td>${fmtR(s.totalBruto)}</td>${ext?'<td></td><td></td>':''}</tr>
+      <tr><td>Vendas líq.${s.pct!=null?' (−'+fmtPct2(s.pct)+')':''}</td>${vend.map(v=>`<td>${fmtR(s.porVendedor[v].venda)}</td>`).join('')}<td>${fmtR(s.totalVenda)}</td>${fext}</tr>`;
+    if(g.id==='online'){ const mk=curMonth(); let tc=0; const cells=vend.map(v=>{ const c=comissaoCodigo(codeOf(v), s.porVendedor[v].venda, mk).pagar; tc+=c; return `<td>${fmtR(c)}</td>`; }).join('');
+      foot += `<tr><td>Comissão</td>${cells}<td>${fmtR(tc)}</td>${ext?'<td></td><td></td>':''}</tr>`; }
+    foot += '</tfoot>';
+  } else foot=`<tfoot><tr><td>Total (dias lançados)</td>${vend.map(v=>`<td>${fmtR(s.porVendedor[v].venda)}</td>`).join('')}<td>${fmtR(s.totalVenda)}</td>${fext}</tr></tfoot>`;
   t.innerHTML=head+body+foot;
   if(!STATIC) t.querySelectorAll('tbody tr').forEach(tr=>{ tr.onclick=()=>openAdd(curMonth(), canal, tr.dataset.date); });
 }
@@ -682,7 +738,7 @@ function renderUnificadoAgb(g, mk){
   const sA=computeStats(g,mk,'Agencia'), sT=computeStats(g,mk,'Totem');
   const total=sA.totalVenda+sT.totalVenda;
   w.innerHTML=`<div class="kpirow">
-    <div class="kpi hero-k"><span class="kpi-label">Vendas líquidas (Agência + Totem)</span><span class="kpi-value">${fmtR(total)}</span><span class="kpi-sub">${sA.diasProcessados} de ${sA.dim} dias lançados</span></div>
+    <div class="kpi hero-k"><span class="kpi-label">Vendas líquidas (Agência + Totem)</span><span class="kpi-value">${fmtR(total)}</span><span class="kpi-sub">${sA.diasProcessados} de ${sA.dim} dias lançados</span>${sA.pct!=null?`<span class="kpi-sub">bruto ${fmtR(sA.totalBruto+sT.totalBruto)} · cancelamentos ${fmtPct2(sA.pct)} (só na Agência)</span>`:(sA.suportaCancel?'<span class="kpi-sub">cancelamento do mês não informado: líquida = bruta</span>':'')}</div>
     <div class="kpi"><span class="kpi-label">Agência</span><span class="kpi-value">${fmtR(sA.totalVenda)}</span><span class="kpi-sub">${total?fmtPct(sA.totalVenda/total*100):'—'} do total</span></div>
     <div class="kpi"><span class="kpi-label">Totem</span><span class="kpi-value">${fmtR(sT.totalVenda)}</span><span class="kpi-sub">${total?fmtPct(sT.totalVenda/total*100):'—'} do total</span></div>
     <div class="kpi"><span class="kpi-label">Passagens</span><span class="kpi-value">${sA.temQtd?fmtN(sA.totalQtd):'—'}</span><span class="kpi-sub">total do dia, agência+totem</span></div>
@@ -699,7 +755,7 @@ function renderUnificadoOnline(g, mk){
   const open = mk===todayISO().slice(0,7) && u.diasProcessados<u.dim;
   if(!nomes.length){ box.innerHTML='<div class="pending-block"><b>Sem vendas lançadas neste mês</b><span>Lance valores em Guanabara ou Princesa para ver o total unificado.</span></div>'; return box; }
   const kpi=document.createElement('div'); kpi.className='kpirow';
-  kpi.innerHTML=`<div class="kpi hero-k"><span class="kpi-label">Vendas líquidas (Guanabara + Princesa)</span><span class="kpi-value">${fmtR(u.totalVenda)}</span><span class="kpi-sub">${u.diasProcessados} de ${u.dim} dias com lançamento</span></div>
+  kpi.innerHTML=`<div class="kpi hero-k"><span class="kpi-label">Vendas líquidas (Guanabara + Princesa)</span><span class="kpi-value">${fmtR(u.totalVenda)}</span><span class="kpi-sub">${u.diasProcessados} de ${u.dim} dias com lançamento</span>${liqSubU(u)}</div>
     <div class="kpi"><span class="kpi-label">Guanabara</span><span class="kpi-value">${fmtR(sG.totalVenda)}</span><span class="kpi-sub">${u.totalVenda?fmtPct(sG.totalVenda/u.totalVenda*100):'—'} do total</span></div>
     <div class="kpi"><span class="kpi-label">Princesa</span><span class="kpi-value">${fmtR(sP.totalVenda)}</span><span class="kpi-sub">${u.totalVenda?fmtPct(sP.totalVenda/u.totalVenda*100):'—'} do total</span></div>
     <div class="kpi"><span class="kpi-label">Passagens</span><span class="kpi-value">${fmtN(u.totalQtd)}</span><span class="kpi-sub">${u.diasComVenda} dias com venda</span></div>
@@ -714,7 +770,7 @@ function renderUnificadoOnline(g, mk){
   h+=`<div class="insight"><div><b>${esc(top)} concentra ${fmtPct(tp.venda/u.totalVenda*100)} das vendas do mês</b><span>${fmtR(tp.venda)} em ${fmtN(tp.qtd)} passagens, somando ${Object.keys(tp.codigos).length>1?'os códigos '+Object.keys(tp.codigos).map(esc).join(' e '):'o código '+esc(Object.keys(tp.codigos)[0])}.</span><div class="conf">${u.diasProcessados<10?'Confiança baixa: poucos dias no mês ainda.':''}</div></div></div>`;
   const diasP = sP.diasProcessados;
   if(sP.vendedores.length && diasP<u.diasProcessados) h+=`<div class="insight pend"><div><b>Princesa tem ${diasP} dia(s) lançado(s) contra ${u.diasProcessados} da Guanabara</b><span>Dia sem lançamento é dado pendente, não venda zero. O total unificado pode crescer quando os PDFs da Princesa chegarem.</span></div></div>`;
-  if(u.piorDia) h+=`<div class="insight warn"><div><b>Pior dia: ${fmtDateFull(u.piorDia.date)} (${dow(u.piorDia.date)}), ${fmtR(u.piorDia.total)}</b><span>Contra uma média diária de ${fmtR(u.mediaDiaria)}.</span></div></div>`;
+  if(u.piorDia) h+=`<div class="insight warn"><div><b>Pior dia (bruto): ${fmtDateFull(u.piorDia.date)} (${dow(u.piorDia.date)}), ${fmtR(u.piorDia.total)}</b><span>Contra uma média diária bruta de ${fmtR(u.diasComVenda?u.totalBruto/u.diasComVenda:0)}.</span></div></div>`;
   const prev=sortedMonths(g).filter(k=>k<mk).pop();
   if(prev){ const pu=computeUnified(g,prev); if(pu.mediaDiaria>0&&u.mediaDiaria>0){ const diff=((u.mediaDiaria/pu.mediaDiaria)-1)*100;
     h+=`<div class="insight ${diff>=0?'good':'warn'}"><div><b>Média diária ${diff>=0?'acima':'abaixo'} de ${monthAbbr(prev)} em ${fmtPct(Math.abs(diff))}</b><span>${monthAbbr(mk)} está em ${fmtR(u.mediaDiaria)}/dia contra ${fmtR(pu.mediaDiaria)}/dia (Guanabara + Princesa).</span></div></div>`; } }
@@ -761,7 +817,10 @@ function drawTableUnified(u, nomes){
     const pend=d.status==='pending';
     return `<tr class="${cls}"><td>${fmtDate(d.date)} · ${dow(d.date)}</td>${cells}<td>${pend?'<span style="color:var(--ink-faint)">pendente</span>':fmtR(d.total)}</td><td>${pend||!d.qtd?'—':fmtN(d.qtd)}</td><td>${pend||!d.qtd?'—':fmtR(d.total/d.qtd)}</td></tr>`;
   }).join('')+'</tbody>';
-  const foot=`<tfoot><tr><td>Total (dias lançados)</td>${nomes.map(n=>`<td>${fmtR(u.pessoas[n].venda)}</td>`).join('')}<td>${fmtR(u.totalVenda)}</td><td>${fmtN(u.totalQtd)}</td><td>${fmtR(u.ticketMedio)}</td></tr></tfoot>`;
+  const cm = comissaoMes(curG(), curMonth());
+  const foot=`<tfoot><tr><td>Total bruto (dias lançados)</td>${nomes.map(n=>`<td>${fmtR(u.pessoas[n].bruto)}</td>`).join('')}<td>${fmtR(u.totalBruto)}</td><td></td><td></td></tr>
+    <tr><td>Vendas líq.</td>${nomes.map(n=>`<td>${fmtR(u.pessoas[n].venda)}</td>`).join('')}<td>${fmtR(u.totalVenda)}</td><td>${fmtN(u.totalQtd)}</td><td>${fmtR(u.ticketMedio)}</td></tr>
+    <tr><td>Comissão</td>${nomes.map(n=>`<td>${fmtR(cm.porPessoa[n]?cm.porPessoa[n].pagar:0)}</td>`).join('')}<td>${fmtR(cm.total)}</td><td></td><td></td></tr></tfoot>`;
   t.innerHTML=head+body+foot;
 }
 
@@ -776,9 +835,9 @@ function regraAgb(code){
   return { aliq:0.03, tipo:'base', texto:'0,03% sobre B45' };
 }
 function buildLiveDocAgb(g, mk, cfg){
-  const s=computeStats(g,mk,'Agencia'); const cancel=cfg&&cfg.cancelamentoPct!=null?Number(cfg.cancelamentoPct):null; const f=1-(cancel||0)/100;
-  const base=s.vendedores.reduce((a,v)=>a+s.porVendedor[v].venda*f,0);
-  const linhas=s.vendedores.map(v=>{ const d=s.porVendedor[v]; const vl=d.venda*f, seg=d.seguro||0; const r=regraAgb(v);
+  const s=computeStats(g,mk,'Agencia'); const cancel=s.pct;   // venda líquida já vem de computeStats (bruto × (1 − % do mês))
+  const base=s.vendedores.reduce((a,v)=>a+s.porVendedor[v].venda,0);
+  const linhas=s.vendedores.map(v=>{ const d=s.porVendedor[v]; const vl=d.venda, seg=d.seguro||0; const r=regraAgb(v);
     const com = r.tipo==='propria' ? (vl+seg)*r.aliq/100 : base*r.aliq/100;
     return { tabe:v, vendaLiq:vl, seguros:seg, comissao:com, regra:r.texto, aliquotaPct:r.aliq }; }).sort((a,b)=>b.comissao-a.comissao);
   return { _live:true, modo:'calculado', label:monthAbbr(mk)+' '+mk.slice(0,4), baseB45:base, cancelamentoPct:cancel, linhas,
@@ -823,11 +882,7 @@ function renderComissaoAgb(g, mk){
   raf(()=>{
     try{ const sorted=linhas.filter(l=>(l.comissao||0)>0).sort((a,b)=>b.comissao-a.comissao);
       $('comRank').innerHTML = sorted.length ? rankingHtml(sorted.map(l=>({nome:l.tabe,key:l.tabe,venda:l.comissao})),total,false) : '<span style="font-size:13px;color:var(--ink-faint)">Sem comissões neste mês.</span>'; }catch(e){ console.error('comRank',e); }
-    const bc=$('btnCancel'); if(bc) bc.onclick=async()=>{
-      const m=$('cancelMsg'); const raw=$('fCancel').value; const n=parseFloat(String(raw).replace(',','.'));
-      if(raw===''||isNaN(n)||n<0||n>100){ m.textContent='Informe um percentual entre 0 e 100.'; m.className='formmsg show err'; return; }
-      try{ await db.doc('comissoes/'+mk).set({ label:monthAbbr(mk)+' '+mk.slice(0,4), modo:'auto', cancelamentoPct:n, updatedAt:new Date().toISOString() }); m.textContent='Salvo. Comissão recalculada.'; m.className='formmsg show ok'; }
-      catch(e){ m.textContent='Não consegui salvar ('+(e?.message||'erro')+').'; m.className='formmsg show err'; } };
+    const bc=$('btnCancel'); if(bc) bc.onclick=()=>saveCancel(g,mk,'Agencia');
     try{ const totals={}; Object.keys(comissoesAgb).forEach(x=>{ const d=comissoesAgb[x]; if(d.linhas&&d.linhas.length) totals[x]=d.total||0; }); if(live) totals[mk]=total;
       const keys=Object.keys(totals).sort(); const soft=resolveColor('var(--ink-soft)'), line=resolveColor('var(--line)'), base=resolveColor(g.cor), faint=resolveColor('var(--line-strong)');
       charts.push(new Chart($('chartCom'),{ type:'bar', data:{ labels:keys.map(monthAbbr), datasets:[{label:'Total de comissões',data:keys.map(x=>totals[x]),backgroundColor:keys.map(x=>x===mk?base:faint),borderRadius:4,maxBarThickness:36}]},
@@ -840,56 +895,62 @@ function renderComissaoAgb(g, mk){
 function renderComissaoOnline(g, mk){
   const w=document.createElement('div'); w.style.cssText='display:flex;flex-direction:column;gap:28px;min-width:0';
   if(!onlineAllLoaded.done) loadOnlineAll();
-  const pessoas=pessoasDoMes(g,mk); const nomes=Object.keys(pessoas).sort((a,b)=>pessoas[b].venda-pessoas[a].venda);
-  const rows=nomes.map(n=>{ const p=pessoas[n]; return { nome:n, p, c:comissaoOnline(n,p.venda,mk) }; });
-  const total=rows.reduce((s,r)=>s+r.c.pagar,0), base=rows.reduce((s,r)=>s+r.p.venda,0);
-  const maior=rows.filter(r=>r.c.pagar>0).sort((a,b)=>b.c.pagar-a.c.pagar)[0];
+  const cm=comissaoMes(g,mk); const { porCodigo, porPessoa, total, base, u }=cm;
+  const pessoas=Object.keys(porPessoa).sort((a,b)=>(porPessoa[b].pagar-porPessoa[a].pagar)||(porPessoa[b].liq-porPessoa[a].liq));
+  const maior=pessoas.find(n=>porPessoa[n].pagar>0);
   const kr=document.createElement('div'); kr.className='kpirow';
-  kr.innerHTML=`<div class="kpi hero-k"><span class="kpi-label">Comissões a pagar: ${monthLong(mk)}</span><span class="kpi-value">${fmtR(total)}</span><span class="kpi-sub">${rows.filter(r=>r.c.pagar>0).length} de ${rows.length} vendedores</span></div>
-    <div class="kpi"><span class="kpi-label">Maior comissão</span><span class="kpi-value">${maior?fmtR(maior.c.pagar):'—'}</span><span class="kpi-sub">${maior?esc(maior.nome):''}</span></div>
-    <div class="kpi"><span class="kpi-label">Base de cálculo</span><span class="kpi-value">${fmtR(base)}</span><span class="kpi-sub">venda líquida, Guanabara + Princesa</span></div>
-    <div class="kpi"><span class="kpi-label">Comissão ÷ venda</span><span class="kpi-value">${base?fmtPct(total/base*100):'—'}</span><span class="kpi-sub">custo de comissão no mês</span></div>`;
+  kr.innerHTML=`<div class="kpi hero-k"><span class="kpi-label">Comissões a pagar: ${monthLong(mk)}</span><span class="kpi-value">${fmtR(total)}</span><span class="kpi-sub">${pessoas.filter(n=>porPessoa[n].pagar>0).length} de ${pessoas.length} pessoas</span></div>
+    <div class="kpi"><span class="kpi-label">Maior comissão</span><span class="kpi-value">${maior?fmtR(porPessoa[maior].pagar):'—'}</span><span class="kpi-sub">${maior?esc(maior):''}</span></div>
+    <div class="kpi"><span class="kpi-label">Base de cálculo</span><span class="kpi-value">${fmtR(base)}</span><span class="kpi-sub">venda líquida (bruto ${fmtR(u.totalBruto)})</span></div>
+    <div class="kpi"><span class="kpi-label">Comissão ÷ líquida</span><span class="kpi-value">${base?fmtPct2(total/base*100):'—'}</span><span class="kpi-sub">custo de comissão no mês</span></div>`;
   w.appendChild(kr);
+
+  const semCancel=u.sets.filter(x=>x.suportaCancel && x.pct==null && x.totalBruto>0).map((x,i)=>g.canais[u.sets.indexOf(x)]);
+  if(semCancel.length){ const a=document.createElement('div'); a.className='insight pend';
+    a.innerHTML=`<div><b>Cancelamento de ${monthLong(mk)} não informado (${semCancel.map(esc).join(' e ')})</b><span>A base de cálculo está igual à venda bruta, então a comissão sai maior que a da planilha. Informe o % de cancelamentos na aba de cada canal para recalcular.</span></div>`; w.appendChild(a); }
 
   const mes=Number(mk.slice(5,7)), esp=COM.especialMeses.includes(mes);
   const rl=document.createElement('div'); rl.className='section';
-  rl.innerHTML=`<div class="section-head"><h2>Fórmulas aplicadas</h2><span class="hint">sempre sobre a venda líquida somada de todos os códigos da pessoa</span></div>
+  rl.innerHTML=mk<COM.inicioRegraNova
+   ? `<div class="section-head"><h2>Fórmulas aplicadas</h2><span class="hint">regra vigente até agosto/2026</span></div><div class="rule-grid"><div class="rule"><b>Pamella (230415D)</b><span>Venda líq. × <code>10%</code> × <code>30%</code></span></div><div class="rule"><b>Todos os demais</b><span>Venda líq. × <code>0,3%</code></span></div></div>`
+   : `<div class="section-head"><h2>Fórmulas aplicadas</h2><span class="hint">sempre sobre a venda líquida de cada código, como nas linhas 37 e 87 da planilha</span></div>
     <div class="rule-grid">
-      <div class="rule"><b>Pamella e novos funcionários</b><span>Venda líq. × <code>${esp?'7%':'10%'}</code> × <code>30%</code></span><span>${esp?'Mês de jan/jul/dez: usa 7%.':'Em jan, jul e dez a base passa a 7% (× 30%).'}</span></div>
-      <div class="rule"><b>Luciele (230415E)</b><span>Venda líq. × <code>10%</code> × <code>30%</code></span><span>Só aparece o que passar de <code>${fmtR(COM.pisoLuciele)}</code>, que é o fixo dela.</span></div>
-      <div class="rule"><b>Gervásio (TABE31 e GSMAG03)</b><span>Venda líq. × <code>0,5%</code></span><span>Total da venda líquida da pessoa no mês.</span></div>
+      <div class="rule"><b>Gervásio</b><span>TABE31: líq. × <code>0,5%</code></span><span>GSMAG03: líq. × <code>0,3%</code></span></div>
+      <div class="rule"><b>Pamella e funcionários novos</b><span>230415D e GSMAG04: líq. × <code>${esp?'7%':'10%'}</code> × <code>30%</code></span><span>${esp?'Mês de jan/jul/dez: usa 7%.':'Em jan, jul e dez a base passa a 7% (× 30%).'}</span></div>
+      <div class="rule"><b>Luciele (230415E)</b><span>líq. × <code>10%</code> × <code>30%</code></span><span>Só aparece o que passar de <code>${fmtR(COM.pisoLuciele)}</code>, que é o fixo dela.</span></div>
+      <div class="rule"><b>TABE16</b><span>líq. × <code>0,3%</code></span></div>
     </div>`;
   w.appendChild(rl);
 
-  const semCad = rows.filter(r=>!r.c.cadastrada);
+  const semCad=porCodigo.filter(r=>!r.cadastrada);
   if(semCad.length){ const ins=document.createElement('div'); ins.className='insight pend';
-    ins.innerHTML=`<div><b>${semCad.map(r=>esc(r.nome)).join(', ')}: sem fórmula própria</b><span>Aplicada a fórmula da Pamella, como definido para funcionários novos. Se este vendedor tiver outra regra, é só informar.</span></div>`; w.appendChild(ins); }
+    ins.innerHTML=`<div><b>${semCad.map(r=>esc(r.code)).join(', ')}: sem fórmula própria</b><span>Aplicada a fórmula da Pamella, como definido para funcionários novos. Se tiver outra regra, é só informar.</span></div>`; w.appendChild(ins); }
 
   const rk=document.createElement('div'); rk.className='section';
-  rk.innerHTML='<div class="section-head"><h2>Comissão por vendedor</h2></div><div class="card" id="comRankO"></div>'; w.appendChild(rk);
+  rk.innerHTML='<div class="section-head"><h2>Comissão por pessoa</h2><span class="hint">soma dos códigos de cada pessoa (linha 92 da planilha)</span></div><div class="card" id="comRankO"></div>'; w.appendChild(rk);
 
   const tb=document.createElement('div'); tb.className='section';
-  const trs=rows.map(r=>{ const cod=Object.keys(r.p.codigos).filter(c=>!(Object.keys(r.p.codigos).length===1 && c===r.nome)).map(c=>`<span class="chip">${esc(c)}</span>`).join('');
-    const pag = r.c.pagar>0 ? fmtR(r.c.pagar) : (r.c.abaixoPiso?'<span class="tag pending">abaixo do fixo</span>':fmtR(0));
-    return `<tr><td>${esc(r.nome)}<span class="chips">${cod}</span></td><td class="txt">${esc(r.c.texto)}</td><td>${fmtR(r.p.venda)}</td><td>${fmtR(r.c.calc)}</td><td><b>${pag}</b></td></tr>`; }).join('');
-  tb.innerHTML=`<div class="section-head"><h2>Tabela de comissões: ${monthLong(mk)}</h2></div><div class="tablewrap"><table><thead><tr><th>Vendedor</th><th style="text-align:left">Fórmula</th><th>Venda líquida</th><th>Calculada</th><th>A pagar</th></tr></thead><tbody>${trs||'<tr><td colspan="5" style="text-align:center;color:var(--ink-faint)">Sem vendas lançadas neste mês.</td></tr>'}</tbody><tfoot><tr><td>Total</td><td></td><td>${fmtR(base)}</td><td>${fmtR(rows.reduce((s,r)=>s+r.c.calc,0))}</td><td>${fmtR(total)}</td></tr></tfoot></table></div>`;
+  const trs=porCodigo.slice().sort((a,b)=>b.liq-a.liq).map(r=>{
+    const pag = r.pagar>0 ? fmtR(r.pagar) : (r.abaixoPiso?'<span class="tag pending">abaixo do fixo</span>':fmtR(0));
+    return `<tr><td>${esc(r.code)}<span class="chips"><span class="chip">${esc(g.canalLabel[r.canal])}</span></span></td><td class="txt">${esc(r.pessoa)}</td><td class="txt">${esc(r.texto)}</td><td>${fmtR(r.bruto)}</td><td>${fmtR(r.liq)}</td><td>${fmtR(r.calc)}</td><td><b>${pag}</b></td></tr>`; }).join('');
+  tb.innerHTML=`<div class="section-head"><h2>Tabela de comissões por código: ${monthLong(mk)}</h2></div><div class="tablewrap"><table><thead><tr><th>Código</th><th style="text-align:left">Pessoa</th><th style="text-align:left">Fórmula</th><th>Venda bruta</th><th>Venda líquida</th><th>Calculada</th><th>A pagar</th></tr></thead><tbody>${trs||'<tr><td colspan="7" style="text-align:center;color:var(--ink-faint)">Sem vendas lançadas neste mês.</td></tr>'}</tbody><tfoot><tr><td>Total</td><td></td><td></td><td>${fmtR(u.totalBruto)}</td><td>${fmtR(base)}</td><td>${fmtR(porCodigo.reduce((s,r)=>s+r.calc,0))}</td><td>${fmtR(total)}</td></tr></tfoot></table></div>`;
   w.appendChild(tb);
 
   const evo=document.createElement('div'); evo.className='section';
-  evo.innerHTML='<div class="section-head"><h2>Comissões por mês</h2><span class="hint">total a pagar, calculado sobre os lançamentos de cada mês</span></div><div class="card"><div class="chart-box" style="height:220px"><canvas id="chartComO"></canvas></div></div>'; w.appendChild(evo);
+  evo.innerHTML='<div class="section-head"><h2>Comissões por mês</h2><span class="hint">total a pagar, calculado sobre a venda líquida de cada mês</span></div><div class="card"><div class="chart-box" style="height:220px"><canvas id="chartComO"></canvas></div></div>'; w.appendChild(evo);
 
   const lim=document.createElement('div'); lim.className='section';
   lim.innerHTML=`<div class="section-head"><h2>Limitações</h2></div><div class="card"><ul class="limlist">
-    <li>A comissão é calculada aqui a partir das vendas lançadas; não há aba de comissão da GSM Online no banco do painel nem na planilha para conferir.</li>
+    <li>A comissão é calculada aqui a partir das vendas lançadas e do % de cancelamentos de cada mês; a planilha continua sendo a conferência.</li>
     <li>Dias da Princesa sem lançamento ainda não entram na base. A comissão sobe quando os PDFs forem lançados.</li>
-    <li>Luciele: quando a comissão calculada não passa do fixo de ${fmtR(COM.pisoLuciele)}, o valor a pagar fica zerado e a coluna "Calculada" mostra o quanto faltou.</li></ul></div>`;
+    <li>Luciele: quando a comissão calculada não passa do fixo de ${fmtR(COM.pisoLuciele)}, o valor a pagar fica zerado e a coluna "Calculada" mostra o quanto ficou abaixo.</li></ul></div>`;
   w.appendChild(lim);
 
   raf(()=>{
-    try{ const ord=rows.filter(r=>r.c.pagar>0).sort((a,b)=>b.c.pagar-a.c.pagar);
-      $('comRankO').innerHTML = ord.length ? rankingHtml(ord.map(r=>({nome:r.nome,key:r.nome,venda:r.c.pagar})),total,false) : '<span style="font-size:13px;color:var(--ink-faint)">Nenhuma comissão a pagar neste mês.</span>'; }catch(e){ console.error('comRankO',e); }
+    try{ const ord=pessoas.filter(n=>porPessoa[n].pagar>0);
+      $('comRankO').innerHTML = ord.length ? rankingHtml(ord.map(n=>({nome:n,key:n,venda:porPessoa[n].pagar,extra:porPessoa[n].codigos.length>1?porPessoa[n].codigos.join(' + '):''})),total,false) : '<span style="font-size:13px;color:var(--ink-faint)">Nenhuma comissão a pagar neste mês.</span>'; }catch(e){ console.error('comRankO',e); }
     try{ const keys=sortedMonths(g).filter(k=>g.canais.some(c=>C.online.entries[entryKey(k,c)] && Object.keys(C.online.entries[entryKey(k,c)]).length));
-      const tots=keys.map(k=>{ const ps=pessoasDoMes(g,k); return Object.keys(ps).reduce((s,n)=>s+comissaoOnline(n,ps[n].venda,k).pagar,0); });
+      const tots=keys.map(k=>comissaoMes(g,k).total);
       const soft=resolveColor('var(--ink-soft)'), line=resolveColor('var(--line)'), baseC=resolveColor(g.cor), faint=resolveColor('var(--line-strong)');
       charts.push(new Chart($('chartComO'),{ type:'bar', data:{ labels:keys.map(monthAbbr), datasets:[{label:'Comissões a pagar',data:tots,backgroundColor:keys.map(k=>k===mk?baseC:faint),borderRadius:4,maxBarThickness:36}]},
         options:{ responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>fmtR(c.raw)}}},
@@ -918,7 +979,7 @@ function openVendorDetail(g, s){
                     : `<tr><td>${fmtDate(x.date)} · ${dow(x.date)}</td><td>${fmtR(y.venda)}</td><td>${fmtN(y.qtd)}</td><td>${fmtR(y.qtd?y.venda/y.qtd:0)}</td></tr>`; }).join('');
     const kp = porDia ? `<div class="kpi"><span class="kpi-label">Seguros</span><span class="kpi-value">${fmtR(d.seguro)}</span></div>`
       : `<div class="kpi"><span class="kpi-label">Passagens</span><span class="kpi-value">${fmtN(d.qtd)}</span></div><div class="kpi"><span class="kpi-label">Ticket médio</span><span class="kpi-value">${fmtR(d.qtd?d.venda/d.qtd:0)}</span></div><div class="kpi"><span class="kpi-label">Seguros</span><span class="kpi-value">${fmtR(d.seguro)}</span></div>`;
-    return `<div class="kpirow" style="margin:6px 0 14px"><div class="kpi"><span class="kpi-label">Venda no mês</span><span class="kpi-value" style="color:${resolveColor(colorFor(codeOf(a)))}">${fmtR(d.venda)}</span><span class="kpi-sub">${fmtPct(pct)} do total</span></div>${kp}</div>
+    return `<div class="kpirow" style="margin:6px 0 14px"><div class="kpi"><span class="kpi-label">Venda líquida no mês</span><span class="kpi-value" style="color:${resolveColor(colorFor(codeOf(a)))}">${fmtR(d.venda)}</span><span class="kpi-sub">${d.bruto!=null&&Math.abs(d.bruto-d.venda)>0.005?'bruto '+fmtR(d.bruto)+' · ':''}${fmtPct(pct)} do total</span></div>${kp}</div>
       <div class="tablewrap"><table><thead><tr><th>Dia</th><th>Venda</th>${porDia?'':'<th>Qtd.</th><th>Ticket</th>'}</tr></thead><tbody>${rows||`<tr><td colspan="${porDia?2:4}" style="text-align:center;color:var(--ink-faint)">Sem vendas lançadas neste mês.</td></tr>`}</tbody></table></div>`;
   });
 }
@@ -927,7 +988,7 @@ function openPessoaDetail(u, nomes){
     const p=u.pessoas[a]; const pct=u.totalVenda?p.venda/u.totalVenda*100:0;
     const rows=u.daily.filter(x=>x.status!=='pending'&&x.pv[a]&&x.pv[a].venda>0).map(x=>`<tr><td>${fmtDate(x.date)} · ${dow(x.date)}</td><td>${fmtR(x.pv[a].venda)}</td><td>${fmtN(x.pv[a].qtd)}</td><td>${fmtR(x.pv[a].qtd?x.pv[a].venda/x.pv[a].qtd:0)}</td></tr>`).join('');
     const cod=Object.entries(p.codigos).map(([c,v])=>`<span class="chip">${esc(c)} · ${fmtR(v)}</span>`).join('');
-    return `<div class="kpirow" style="margin:6px 0 8px"><div class="kpi"><span class="kpi-label">Venda no mês</span><span class="kpi-value" style="color:${resolveColor(colorFor(a))}">${fmtR(p.venda)}</span><span class="kpi-sub">${fmtPct(pct)} do total</span></div>
+    return `<div class="kpirow" style="margin:6px 0 8px"><div class="kpi"><span class="kpi-label">Venda líquida no mês</span><span class="kpi-value" style="color:${resolveColor(colorFor(a))}">${fmtR(p.venda)}</span><span class="kpi-sub">${Math.abs(p.bruto-p.venda)>0.005?'bruto '+fmtR(p.bruto)+' · ':''}${fmtPct(pct)} do total</span></div>
       <div class="kpi"><span class="kpi-label">Passagens</span><span class="kpi-value">${fmtN(p.qtd)}</span></div><div class="kpi"><span class="kpi-label">Ticket médio</span><span class="kpi-value">${fmtR(p.qtd?p.venda/p.qtd:0)}</span></div><div class="kpi"><span class="kpi-label">Seguros</span><span class="kpi-value">${fmtR(p.seguro)}</span></div></div>
       <div class="chips" style="margin:0 0 14px">${cod}</div>
       <div class="tablewrap"><table><thead><tr><th>Dia</th><th>Venda</th><th>Qtd.</th><th>Ticket</th></tr></thead><tbody>${rows||'<tr><td colspan="4" style="text-align:center;color:var(--ink-faint)">Sem vendas lançadas neste mês.</td></tr>'}</tbody></table></div>`;
